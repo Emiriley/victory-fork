@@ -740,6 +740,17 @@ void main() {
             std::ptr::copy_nonoverlapping(content[PIECE..PIECE + 16].as_ptr(), now_ptr.add(PIECE + 16), 16);
         }
         assert_eq!(run(&mut warp, 1), [0, 1, 0]);
+        // Restore piece 1, then flip the sign bit of the first u32 in both
+        // lane 0's and lane 32's final 16-byte loads of piece 0 (offsets
+        // 64,512 and 65,024). The asymmetric reduction must not let the pair
+        // cancel out.
+        // SAFETY: all offsets are inside the mapped buffer.
+        unsafe {
+            std::ptr::copy_nonoverlapping(content[PIECE..PIECE + 32].as_ptr(), now_ptr.add(PIECE), 32);
+            now_ptr.add(64_512 + 3).write_volatile(content[64_512 + 3] ^ 0x80);
+            now_ptr.add(65_024 + 3).write_volatile(content[65_024 + 3] ^ 0x80);
+        }
+        assert_eq!(run(&mut warp, 1), [1, 0, 0]);
     }
 
     /// The clamp compiles with the system's compiler and the host takes it.

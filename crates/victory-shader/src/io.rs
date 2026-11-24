@@ -475,24 +475,97 @@ pub fn raise(p: &Program, native: &NativeProgram) -> Result<Io, ShaderError> {
         .iter()
         .filter_map(|(s, i)| matches!(i, Interp::Interpolated { .. }).then_some(*s))
         .collect();
-    let mut used: std::collections::HashSet<_> = p
+    let entry = |reg| p.inputs.iter().find(|r| r.0 == reg).map(|r| r.1);
+    let reads: Vec<Vec<Vec<Value>>> = p
         .blocks
         .iter()
-        .enumerate()
-        .flat_map(|(b, blk)| {
-            blk.insts
+        .map(|block| {
+            block
+                .insts
                 .iter()
-                .enumerate()
-                .map(move |(i, inst)| ((b, i), inst))
+                .map(|inst| {
+                    // IR also records the old VGPR destination for EXEC preservation.
+                    // An ordinary full-word move under unchanged entry EXEC does not
+                    // consume it. Masked, DPP and SDWA moves must retain that dependency.
+                    let overwrite = match &inst.fields {
+                        Fields::Valu(v)
+                            if inst.name() == "v_mov_b32"
+                                && v.dpp.is_none()
+                                && v.sdwa.is_none()
+                                && entry(Reg::S(crate::ir::EXEC)).is_some()
+                                && inst.read(Reg::S(crate::ir::EXEC))
+                                    == entry(Reg::S(crate::ir::EXEC))
+                                && (!native.wave64
+                                    || inst.read(Reg::S(crate::ir::EXEC + 1))
+                                        == entry(Reg::S(crate::ir::EXEC + 1))) =>
+                        {
+                            match v.dst {
+                                Some(Operand::Vector { reg, .. })
+                                    if !v.src.iter().any(|s| {
+                                        matches!(*s, Operand::Vector { reg: first, dwords }
+                                if u16::from(reg) >= u16::from(first)
+                                    && u16::from(reg) < u16::from(first) + u16::from(dwords))
+                                    }) =>
+                                {
+                                    Some(Reg::V(reg))
+                                }
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    };
+                    inst.reads
+                        .iter()
+                        .filter(|r| Some(r.0) != overwrite)
+                        .map(|r| r.1)
+                        .collect()
+                })
+                .collect()
         })
-        .filter(|(s, _)| !folded.contains(s))
-        .flat_map(|(_, inst)| inst.reads.iter().map(|r| r.1))
         .collect();
+    let mut used = std::collections::HashSet::new();
+    for (b, block) in p.blocks.iter().enumerate() {
+        for (i, inst) in block.insts.iter().enumerate() {
+            // Effects need their operands. Scalar writes may feed a branch;
+            // conservatively retain them even when its control use is implicit.
+            if matches!(inst.fields, Fields::Exp { .. })
+                || inst.name().contains("store")
+                || inst.name().contains("atomic")
+                || inst
+                    .writes
+                    .iter()
+                    .any(|w| matches!(w.0, Reg::S(_) | Reg::Scc))
+            {
+                used.extend(reads[b][i].iter().copied());
+            }
+        }
+    }
     loop {
         let before = used.len();
         for phi in p.blocks.iter().flat_map(|b| &b.phis) {
             if used.contains(&phi.value) {
                 used.extend(&phi.args);
+            }
+        }
+        for (b, block) in p.blocks.iter().enumerate() {
+            for (i, inst) in block.insts.iter().enumerate() {
+                if !inst.writes.iter().any(|w| used.contains(&w.1)) {
+                    continue;
+                }
+                if folded.contains(&(b, i)) {
+                    // Folding replaces the pair's arithmetic inputs, but f16 p2
+                    // still preserves the old destination's upper 16 bits. This
+                    // may differ from the pair's explicit accumulator VGPR.
+                    if inst.name() == "v_interp_p2_f16"
+                        && let Fields::Valu(v) = &inst.fields
+                        && let Some(Operand::Vector { reg, .. }) = v.dst
+                        && let Some(old) = inst.read(Reg::V(reg))
+                    {
+                        used.insert(old);
+                    }
+                } else {
+                    used.extend(reads[b][i].iter().copied());
+                }
             }
         }
         if used.len() == before {

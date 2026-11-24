@@ -1599,6 +1599,10 @@ mod barycentric_tests {
     /// Translates a pixel program with the input VGPRs `input_addr`
     /// enables and one float4 TEXCOORD0 attribute (attr 0, row 0).
     fn pixel(words: &[u32], input_addr: u32) -> Result<HostShader, ShaderError> {
+        pixel_with_half(words, input_addr, false)
+    }
+
+    fn pixel_with_half(words: &[u32], input_addr: u32, fp16: bool) -> Result<HostShader, ShaderError> {
         let native = NativeProgram {
             stage: HwStage::Ps,
             wave64: false,
@@ -1612,7 +1616,7 @@ mod barycentric_tests {
                     mask: 0b1111,
                     attr: 0,
                     flat: false,
-                    fp16: false,
+                    fp16,
                     pack2: false,
                     row2: 0,
                 }],
@@ -1629,9 +1633,9 @@ mod barycentric_tests {
         let bytes = crate::dxbc::build(&[(FourCC::ISG1, &isg1), (FourCC::OSG1, &osg1)]);
         let c = Container::parse(&bytes).unwrap();
         let p = ir::build(&native.patched_code(), native.wave64, native.vgprs)?;
-        let res = resource::track(&p, &native.layout, native.stage, None)?;
-        let io = io::raise(&p, &native)?;
         let st = structure::structure(&p)?;
+        let res = resource::track(&p, &native.layout, native.stage, Some(&st))?;
+        let io = io::raise(&p, &native)?;
         emit(&c, &native, &p, &st, &io, &res)
     }
 
@@ -1725,6 +1729,52 @@ mod barycentric_tests {
     }
 
     #[test]
+    fn a_dead_first_half_overwritten_by_a_move_adds_no_barycentrics() {
+        let [e0, e1] = exp_mrt0(3);
+        for use_zero in [false, true] {
+            let mut words = vec![
+                0xC808_0000, // dead p1 in v2
+                0x7E04_0280, // v_mov_b32 v2, 0, with entry EXEC unchanged
+                0xC80C_0000, // ordinary p1/p2 in v3 of the same attribute
+                0xC80D_0001,
+            ];
+            if use_zero {
+                words.push(v_add_f32(3, 3, 2));
+            }
+            words.extend([e0, e1, S_ENDPGM]);
+            let shader = pixel(&words, PERSP_CENTER).unwrap();
+            let (features, inputs) = parts(&shader);
+            assert_eq!(features & 0x2_0000, 0);
+            assert!(inputs.iter().all(|e| e.kind != 28));
+            assert_ne!(texcoord_mode(&shader), 1);
+            validate(&shader);
+        }
+    }
+
+    #[test]
+    fn a_masked_move_keeps_the_first_half_outside_exec() {
+        let [e0, e1] = exp_mrt0(2);
+        let shader = pixel(
+            &[
+                0xC808_0000, // v_interp_p1_f32 v2, v0, attr0.x
+                0x7C02_0300, // v_cmp_lt_f32 vcc, v0, v1
+                0xBE86_3C6A, // s_and_saveexec_b32 s6, vcc
+                0x7E04_0280, // v_mov_b32 v2, 0
+                0xBEFE_0306, // s_mov_b32 exec_lo, s6
+                e0,
+                e1,
+                S_ENDPGM,
+            ],
+            PERSP_CENTER,
+        )
+        .unwrap();
+        let (features, _) = parts(&shader);
+        assert_ne!(features & 0x2_0000, 0);
+        assert_eq!(texcoord_mode(&shader), 1);
+        validate(&shader);
+    }
+
+    #[test]
     fn a_first_half_read_beside_its_pair_keeps_its_partial_value() {
         let shader = first_half_pixel(true);
         assert_eq!(texcoord_mode(&shader), 1);
@@ -1743,6 +1793,29 @@ mod barycentric_tests {
         }
         words.extend([e0, e1, 0xBF81_0000]);
         pixel(&words, PERSP_CENTER).unwrap()
+    }
+
+    fn first_half_high_word_pixel() -> HostShader {
+        let [e0, e1] = exp_mrt0(2);
+        pixel_with_half(
+            &[
+                0xD742_0002, 0x0002_0000, // p1ll v2, v0, attr0.x: old destination
+                0xD742_0003, 0x0002_0000, // p1ll v3, v0, attr0.x: pair accumulator
+                0xD75A_0002, 0x040E_0200, // p2_f16 v2, attr0.x, v1, v3
+                e0, e1, S_ENDPGM,
+            ],
+            PERSP_CENTER,
+            true,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_folded_f16_pair_preserves_the_old_destination_high_word() {
+        let shader = first_half_high_word_pixel();
+        assert_ne!(parts(&shader).0 & 0x2_0000, 0);
+        assert_eq!(texcoord_mode(&shader), 1);
+        validate(&shader);
     }
 
     #[test]
@@ -1818,8 +1891,12 @@ mod barycentric_tests {
                 eprintln!("no barycentrics on {backend}; skipped");
                 continue;
             }
-            for paired in [false, true] {
-                let ps = first_half_pixel(paired);
+            for case in 0..3 {
+                let ps = if case == 2 {
+                    first_half_high_word_pixel()
+                } else {
+                    first_half_pixel(case == 1)
+                };
                 validate(&ps);
                 let (root, pso) = host.pipeline(&vs, &ps).expect("interpolation pipeline");
                 let out = host
@@ -1841,15 +1918,24 @@ mod barycentric_tests {
                     let i = (n / 8) as f32 / 16.0 + 0.5 / 16.0;
                     let j = (n % 8) as f32 / 16.0 + 0.5 / 16.0;
                     let partial = 2.0 + i * 4.0;
-                    let want = if paired {
+                    let want = if case == 1 {
                         partial + 2.0 + i * 4.0 + j * 8.0
                     } else {
                         partial
                     };
                     for &got in texel {
+                        if case == 2 {
+                            let full = 2.0 + i * 4.0 + j * 8.0;
+                            // Every value in this fixture is exactly representable in f16.
+                            let bits = full.to_bits();
+                            let half = (((bits >> 23) - 112) << 10) | ((bits >> 13) & 0x3ff);
+                            let expected = (partial.to_bits() & 0xffff_0000) | half;
+                            assert_eq!(got.to_bits(), expected, "{backend} f16 pixel={n}");
+                            continue;
+                        }
                         assert!(
                             (got - want).abs() < 1e-5,
-                            "{backend} paired={paired} pixel={n}: got {got}, want {want}"
+                            "{backend} case={case} pixel={n}: got {got}, want {want}"
                         );
                     }
                 }

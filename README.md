@@ -1,5 +1,26 @@
 # VIctory fork (work in progress)
 
+> **Emiriley/victory-fork** — a fork of
+> [fxceless/victory-fork](https://github.com/fxceless/victory-fork) that
+> integrates its open pull requests with our own fixes, tested on an
+> NVIDIA RTX 3090 (24 GB), Windows 11, Series X profile.
+>
+> | Branch | What it is |
+> | --- | --- |
+> | `bench` | fxceless `main` + PRs #63, 61, 52, 51, 40, 36, 66, 67, 71, 38, 74 — first build that reached the game here (tag `ingame-2026-11-24`, 3 fps) |
+> | `bench2` | + PRs #74, 104, 98, 108, 106, 97, 95, 92, 90, 87, 84, 83, 81, 80, 79 |
+> | `bench3` | + PRs #114, 115, 110 and #82 (merged by hand with #51) — interior lit, 4 fps / 229 ms per frame (tag `ingame-4fps-2026-11-24`) |
+> | `bench4` | + PRs #71 (update), 119, 121, 123, 135 — current |
+>
+> Known on the RTX 3090: skin and hair in shadow render black in screen
+> tiles, some skin renders white; 14 compute pipelines are refused by the
+> driver. Being investigated.
+>
+> **Contributors to this fork:** [Emiriley](https://github.com/Emiriley)
+> (testing, direction) and Claude (Anthropic's Claude Code: merges, conflict
+> resolution, diagnostics). All credit for the base goes to fxceless and to
+> VIctory's authors below.
+
 A work-in-progress fork of [VIctory](https://github.com/Marvisak/VIctory), a
 compatibility layer that runs an Xbox Series title natively on Windows from
 files the user supplies. This fork follows upstream

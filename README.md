@@ -170,6 +170,25 @@ while pressed; releasing them restores the controller's stick values:
 | F / H | stick clicks |
 | Esc, Tab | Menu, View |
 
+### Xbox controllers over Bluetooth on Linux
+
+With xpadneo, SDL's raw controller backends can detect an Xbox controller
+without receiving its buttons. @MiguVT confirmed this workaround on their
+NixOS / GE-Proton setup: set both variables before launching through umu,
+keeping your usual Proton build, prefix and arguments:
+
+```sh
+export SDL_JOYSTICK_HIDAPI=0
+export SDL_JOYSTICK_RAWINPUT=0
+```
+
+These exports apply to subsequent launches from that terminal. They make SDL
+use its Linux input backend instead of the raw backends. If using another
+terminal or a desktop launcher, set the variables there too.
+See the [xpadneo issue](https://github.com/atar-axis/xpadneo/issues/543).
+This addresses the reported physical-controller issue separately from
+VIctory's keyboard/gamepad coexistence fix.
+
 ## Commands
 
 ```

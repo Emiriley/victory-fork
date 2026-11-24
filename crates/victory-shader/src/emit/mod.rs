@@ -482,6 +482,27 @@ pub fn emit(
         }
         other => other,
     };
+    // Last resort on a 32-lane host: a program still asking for 64-lane waves is refused there
+    // and runs not at all; once more in waves of 32 with data crossing the halves taken per
+    // half ([`lower::with_forced_wave32`], approximate). `VICTORY_WAVE32_LAST_RESORT=0`: off.
+    let original = if matches!(&original, Ok((_, Some(64))))
+        && native.stage == HwStage::Cs
+        && native.wave64
+        && lower::host_max_wave() == 32
+        && std::env::var_os("VICTORY_WAVE32_LAST_RESORT").is_none_or(|v| v != "0")
+    {
+        match lower::with_forced_wave32(|| emit_program(c, native, p, st, io, res)) {
+            Ok((shader, wave)) if wave != Some(64) => {
+                if std::env::var_os("VICTORY_WAVE_WHY").is_some() {
+                    eprintln!("WAVE64-RETRY forced waves of 32 (APPROXIMATE, last resort): wave {wave:?}");
+                }
+                Ok((shader, wave))
+            }
+            _ => original,
+        }
+    } else {
+        original
+    };
     let original = original.map(|(shader, _)| shader);
     // Retry unsupported programs only. Threading can separate an unknown
     // register value from its apparent use on a mutually exclusive path.

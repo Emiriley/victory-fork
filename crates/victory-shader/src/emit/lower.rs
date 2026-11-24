@@ -966,6 +966,23 @@ thread_local! {
     static LOCAL_WAVES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// See [`with_local_waves_any`].
     static LOCAL_ANY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// See [`with_forced_wave32`].
+    static FORCED_WAVE32: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `f` with a console wave64 compute program on a 32-lane host taken in
+/// waves of 32 even where data crosses the two halves of a console wave (lane
+/// reads across halves, masks as numbers, LDS shared without barriers): each
+/// host wave is half a console wave, as in the exact 32-lane form, and code
+/// that moves data between the halves gets per-half results. The last
+/// resort (`emit`) for a program that would otherwise ask the host for
+/// 64-lane waves, which a 32-lane host refuses: nothing would run at all
+/// (an RTX 3090 drew skin and hair in shadow as black 8x8 tiles).
+pub(super) fn with_forced_wave32<R>(f: impl FnOnce() -> R) -> R {
+    let was = FORCED_WAVE32.replace(true);
+    let r = f();
+    FORCED_WAVE32.set(was);
+    r
 }
 
 /// As [`with_local_waves`], with every other use of a lane mask as a number
@@ -1308,7 +1325,7 @@ impl<'a> Lower<'a> {
                         || reads_mask_as_data(x.st, i)
                 }) || lane_constant_masks(x.st)
                     || !x.st.wide.is_empty();
-                if !crosses && (s.lds_dwords == 0 || group <= 32) {
+                if FORCED_WAVE32.get() || !crosses && (s.lds_dwords == 0 || group <= 32) {
                     wave = 32;
                 } else {
                     // (Groups of several console waves too: each console wave is two host

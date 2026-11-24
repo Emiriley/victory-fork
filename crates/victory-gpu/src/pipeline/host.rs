@@ -597,6 +597,21 @@ impl HostPipeline {
                 Err(e) => {
                     tracing::warn!(error = %e, ?shaders, "host pipeline refused");
                     host.log_messages();
+                    // `VICTORY_DUMP_REFUSED=<dir>`: the refused program's DXIL, for
+                    // `dxc -dumpbin` (why the host would not take it)
+                    if let Some(dir) = std::env::var_os("VICTORY_DUMP_REFUSED") {
+                        let dir = std::path::PathBuf::from(dir);
+                        let file: String = format!("{shaders:?}")
+                            .chars()
+                            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                            .collect();
+                        let dxil = stages.first().and_then(|(s, _)| s.translated()).map(|t| t.host.dxil.clone());
+                        if let Some(dxil) = dxil
+                            && std::fs::create_dir_all(&dir).is_ok()
+                        {
+                            let _ = std::fs::write(dir.join(format!("{file}.dxil")), dxil);
+                        }
+                    }
                     return None;
                 }
             };
